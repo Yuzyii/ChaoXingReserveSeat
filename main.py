@@ -24,7 +24,7 @@ get_current_dayofweek = lambda action: (
 
 
 SLEEPTIME = 0.2  # 每次抢座的间隔
-ENDTIME = "07:01:00"  # 根据学校的预约座位时间+1min即可
+ENDTIME = "15:01:00"  # 根据学校的预约座位时间+1min即可
 
 ENABLE_SLIDER = True  # 是否有滑块验证
 MAX_ATTEMPT = 5  # 最大尝试次数
@@ -69,33 +69,46 @@ def login_and_reserve(users, usernames, passwords, action, success_list=None):
 
 
 def main(users, action=False):
-    current_time = get_current_time(action)
-    logging.info(f"start time {current_time}, action {'on' if action else 'off'}")
-    attempt_times = 0
+    # 1. 第一步：如果是 GitHub Action，先把账号密码从环境变量里拿出来
+    # 这一步要在八点前做完，不能等八点到了才现拿
     usernames, passwords = None, None
     if action:
         usernames, passwords = get_user_credentials(action)
+
+        # 2. 第二步：进入精准等待循环
+        import datetime
+        logging.info("GitHub Action 模式已启动，正在预热并等待北京时间 20:00:00...")
+        while True:
+            # 获取当前北京时间
+            now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+            # 一旦到了 20 点（或超过），立刻跳出循环去抢座
+            if now.hour >= 20:
+                logging.info(f"到达预定时间: {now.strftime('%H:%M:%S')}，开始抢座！")
+                break
+            time.sleep(0.1) # 稍微缩短检查间隔，提高精度
+
+    # 3. 第三步：原有的抢座逻辑开始执行
+    current_time = get_current_time(action)
+    logging.info(f"start time {current_time}, action {'on' if action else 'off'}")
+    attempt_times = 0
     success_list = None
     current_dayofweek = get_current_dayofweek(action)
     today_reservation_num = sum(
         1 for d in users if current_dayofweek in d.get("daysofweek")
     )
+    
     while current_time < ENDTIME:
         attempt_times += 1
-        # try:
         success_list = login_and_reserve(
             users, usernames, passwords, action, success_list
         )
-        # except Exception as e:
-        #     print(f"An error occurred: {e}")
         print(
             f"attempt time {attempt_times}, time now {current_time}, success list {success_list}"
         )
         current_time = get_current_time(action)
-        if sum(success_list) == today_reservation_num:
+        if success_list and sum(success_list) == today_reservation_num:
             print(f"reserved successfully!")
             return
-
 
 def debug(users, action=False):
     logging.info(

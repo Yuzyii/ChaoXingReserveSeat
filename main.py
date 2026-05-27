@@ -4,10 +4,7 @@ import argparse
 import os
 import logging
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 from utils import reserve, get_user_credentials
 
@@ -21,7 +18,6 @@ get_current_dayofweek = lambda action: (
     if action
     else time.strftime("%A", time.localtime(time.time()))
 )
-
 
 SLEEPTIME = 0.2  # 每次抢座的间隔
 ENDTIME = "15:01:00"  # 根据学校的预约座位时间+1min即可
@@ -39,6 +35,7 @@ def login_and_reserve(users, usernames, passwords, action, success_list=None):
         raise Exception("user number should match the number of config")
     if success_list is None:
         success_list = [False] * len(users)
+
     current_dayofweek = get_current_dayofweek(action)
     for index, user in enumerate(users):
         username, password, times, roomid, seatid, daysofweek = user.values()
@@ -51,9 +48,7 @@ def login_and_reserve(users, usernames, passwords, action, success_list=None):
             logging.info("Today not set to reserve")
             continue
         if not success_list[index]:
-            logging.info(
-                f"----------- {username} -- {times} -- {seatid} try -----------"
-            )
+            logging.info(f"----------- {username} -- {times} -- {seatid} try -----------")
             s = reserve(
                 sleep_time=SLEEPTIME,
                 max_attempt=MAX_ATTEMPT,
@@ -75,17 +70,30 @@ def main(users, action=False):
     if action:
         usernames, passwords = get_user_credentials(action)
 
-        # 2. 第二步：进入精准等待循环
+        # 2. 第二步：进入精准等待循环（北京时间 15:00:03）
         import datetime
-        logging.info("GitHub Action 模式已启动，正在预热并等待北京时间 15:00:00...")
+
+        now_bj = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+        target = now_bj.replace(hour=15, minute=0, second=3, microsecond=0)
+
+        logging.info(
+            f"GitHub Action 模式已启动，正在预热并等待北京时间 {target.strftime('%H:%M:%S')}..."
+        )
+
         while True:
-            # 获取当前北京时间
             now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-            # 一旦到了 15 点（或超过），立刻跳出循环去抢座
-            if now.hour >= 15:
-                logging.info(f"到达预定时间: {now.strftime('%H:%M:%S')}，开始抢座！")
+            diff = (target - now).total_seconds()
+            if diff <= 0:
+                logging.info(f"到达预定时间: {now.strftime('%H:%M:%S.%f')}，开始抢座！")
                 break
-            time.sleep(0.1) # 稍微缩短检查间隔，提高精度
+
+            # 分段睡眠：越接近目标时间，检查越频繁，提高精度
+            if diff > 2:
+                time.sleep(0.5)
+            elif diff > 0.2:
+                time.sleep(0.05)
+            else:
+                time.sleep(0.005)
 
     # 3. 第三步：原有的抢座逻辑开始执行
     current_time = get_current_time(action)
@@ -93,22 +101,17 @@ def main(users, action=False):
     attempt_times = 0
     success_list = None
     current_dayofweek = get_current_dayofweek(action)
-    today_reservation_num = sum(
-        1 for d in users if current_dayofweek in d.get("daysofweek")
-    )
-    
+    today_reservation_num = sum(1 for d in users if current_dayofweek in d.get("daysofweek"))
+
     while current_time < ENDTIME:
         attempt_times += 1
-        success_list = login_and_reserve(
-            users, usernames, passwords, action, success_list
-        )
-        print(
-            f"attempt time {attempt_times}, time now {current_time}, success list {success_list}"
-        )
+        success_list = login_and_reserve(users, usernames, passwords, action, success_list)
+        print(f"attempt time {attempt_times}, time now {current_time}, success list {success_list}")
         current_time = get_current_time(action)
         if success_list and sum(success_list) == today_reservation_num:
-            print(f"reserved successfully!")
+            print("reserved successfully!")
             return
+
 
 def debug(users, action=False):
     logging.info(
@@ -118,6 +121,7 @@ def debug(users, action=False):
     logging.info(f" Debug Mode start! , action {'on' if action else 'off'}")
     if action:
         usernames, passwords = get_user_credentials(action)
+
     current_dayofweek = get_current_dayofweek(action)
     for index, user in enumerate(users):
         username, password, times, roomid, seatid, daysofweek = user.values()
@@ -181,6 +185,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     func_dict = {"reserve": main, "debug": debug, "room": get_roomid}
-    with open(args.user, "r+") as data:
+    with open(args.user, "r+", encoding="utf-8") as data:
         usersdata = json.load(data)["reserve"]
     func_dict[args.method](usersdata, args.action)

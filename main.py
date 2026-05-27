@@ -77,12 +77,12 @@ def main(users, action=False):
 
         # 2. 第二步：进入精准等待循环
         import datetime
-        logging.info("GitHub Action 模式已启动，正在预热并等待北京时间 20:00:00...")
+        logging.info("GitHub Action 模式已启动，正在预热并等待北京时间 15:00:00...")
         while True:
             # 获取当前北京时间
             now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-            # 一旦到了 20 点（或超过），立刻跳出循环去抢座
-            if now.hour >= 20:
+            # 一旦到了 15 点（或超过），立刻跳出循环去抢座
+            if now.hour >= 15:
                 logging.info(f"到达预定时间: {now.strftime('%H:%M:%S')}，开始抢座！")
                 break
             time.sleep(0.1) # 稍微缩短检查间隔，提高精度

@@ -6,7 +6,9 @@ name: auto_Reserve
 # or API.
 on:
   schedule:
-    - cron: "00 10 * * *" # 周一到周五每天早上5:59启动（防止github action过于高负载）
+    # 注意：GitHub Actions cron 只能精确到“分钟”，且以 UTC 计时。
+    # 若想在北京时间 15:00:03 左右开始抢座：建议提前几分钟启动，然后由 main.py 内部等待到 STARTTIME=15:00:03 再开始。
+    - cron: "55 6 * * *" # 周一到周五：北京时间 14:55 触发（UTC 06:55）
   workflow_dispatch:
   
 jobs:
@@ -30,5 +32,5 @@ jobs:
           USERNAMES: ${{ secrets.USERNAMES }}
           PASSWORDS: ${{ secrets.PASSWORDS }}
         run: |
-          python main.py -m reserve --action
+          python main.py -m debug --action
 

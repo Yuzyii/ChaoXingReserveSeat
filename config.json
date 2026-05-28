@@ -2,10 +2,10 @@
     "reserve": [
         {"username": "12345678",
         "password": "88888888",
-        "time": [["14:00","17:00"], ["17:00","22:00"]],
+        "time": [["12:00","17:00"], ["17:00","22:00"]],
         "max_hours_per_reserve": 5,
         "roomid":"3224",
-        "seatid":["011"],
+        "seatid":["160"],
         "daysofweek": ["Monday" , "Tuesday", "Wednesday", "Thursday", "Friday","Saturday" , "Sunday"]
     }
     ]

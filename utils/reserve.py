@@ -6,6 +6,7 @@ import time
 import logging
 import datetime
 from urllib3.exceptions import InsecureRequestWarning
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def get_date(day_offset: int = 0):

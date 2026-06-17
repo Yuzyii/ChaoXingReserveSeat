@@ -25,9 +25,9 @@ get_current_dayofweek = lambda action: (
 )
 
 
-SLEEPTIME = 0.05  # 每次抢座的间隔，从0.2降到0.05
+SLEEPTIME = 0.2  # 每次抢座的间隔，从0.2降到0.05
 ENDTIME = "15:01:00"  # 根据学校的预约座位时间+1min即可
-STARTTIME = "15:00:00"  # GitHub Actions 场景下，脚本会等待到该时刻再开始抢座（精确到秒）
+STARTTIME = "15:00:01"  # GitHub Actions 场景下，脚本会等待到该时刻再开始抢座（精确到秒）
 WAIT_UNTIL_STARTTIME_IN_ACTIONS = True  # 仅在 --action 时生效
 
 ENABLE_SLIDER = True  # 是否有滑块验证
@@ -39,7 +39,7 @@ def _parse_hhmm(s: str) -> datetime.datetime:
     return datetime.datetime.strptime(s, "%H:%M")
 
 
-def wait_until_time(target_hms: str, action: bool, check_interval: float = 0.05):
+def wait_until_time(target_hms: str, action: bool, check_interval: float = 0.2):
     """
     等待直到 target_hms（格式 HH:MM:SS）。
     注意：GitHub Actions 的 schedule 触发本身只能精确到"分钟"，且启动时间可能有抖动；
@@ -210,7 +210,7 @@ def main(users, action=False):
     # GitHub Actions：先等到目标秒再开始（避免 15:00:xx 前就开始请求）
     if action and WAIT_UNTIL_STARTTIME_IN_ACTIONS:
         logging.info(f"Waiting until {STARTTIME} to start reserving...")
-        wait_until_time(STARTTIME, action, check_interval=0.05)
+        wait_until_time(STARTTIME, action, check_interval=0.2)
         current_time = get_current_time(action)
 
     while current_time < ENDTIME:

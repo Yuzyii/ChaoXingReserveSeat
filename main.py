@@ -27,7 +27,7 @@ get_current_dayofweek = lambda action: (
 
 SLEEPTIME = 0.2  # 每次抢座的间隔，从0.2降到0.05
 ENDTIME = "15:01:00"  # 根据学校的预约座位时间+1min即可
-STARTTIME = "14:59:56"  # GitHub Actions 场景下，脚本会等待到该时刻再开始抢座（精确到秒）
+STARTTIME = "14:59:57"  # GitHub Actions 场景下，脚本会等待到该时刻再开始抢座（精确到秒）
 WAIT_UNTIL_STARTTIME_IN_ACTIONS = True  # 仅在 --action 时生效
 
 ENABLE_SLIDER = True  # 是否有滑块验证

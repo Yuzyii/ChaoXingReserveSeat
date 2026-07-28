@@ -5,8 +5,12 @@ import re
 import time
 import logging
 import datetime
+import numpy as np
+import cv2
 from urllib3.exceptions import InsecureRequestWarning
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 
 def get_date(day_offset: int = 0):
@@ -19,20 +23,18 @@ def get_date(day_offset: int = 0):
 class reserve:
     def __init__(
         self,
-        sleep_time=0.2,
-        max_attempt=50,
-        enable_slider=False,
+        sleep_time=0.05,
+        max_attempt=5,
+        enable_slider=True,
         reserve_next_day=False,
     ):
-        self.login_page = (
-            "https://passport2.chaoxing.com/mlogin?loginType=1&newversion=true&fid="
-        )
+        self.login_page = "https://passport2.chaoxing.com/mlogin?fid=&newversion=true&refer=http%3A%2F%2Foffice.chaoxing.com%2Ffront%2Fthird%2Fapps%2Fseat%2Fcode%3Fid%3D4219%26seatNum%3D380"
+        self.login_url = "https://passport2.chaoxing.com/fanyalogin"
         self.url = (
             "https://office.chaoxing.com/front/third/apps/seat/code?id={}&seatNum={}"
         )
         self.submit_url = "https://office.chaoxing.com/data/apps/seat/submit"
         self.seat_url = "https://office.chaoxing.com/data/apps/seat/getusedtimes"
-        self.login_url = "https://passport2.chaoxing.com/fanyalogin"
         self.token = ""
         self.success_times = 0
         self.fail_dict = []
@@ -49,7 +51,6 @@ class reserve:
             "Sec-Fetch-Dest": "document",
             "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
             "Upgrade-Insecure-Requests": "1",
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         }
@@ -69,13 +70,11 @@ class reserve:
         self.max_attempt = max_attempt
         self.enable_slider = enable_slider
         self.reserve_next_day = reserve_next_day
-        requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+        self._captcha_executor = ThreadPoolExecutor(max_workers=2)
 
-    # login and page token
     def _get_page_token(self, url, require_value=False):
         response = self.requests.get(url=url, verify=False)
         html = response.content.decode("utf-8")
-        # matches = re.findall(r"token = \'(.*?)\'", html)
         matches = re.findall(r'id="submit_enc"\s+value="(.*?)"', html)
         value_matches = None
         if require_value:
@@ -113,7 +112,6 @@ class reserve:
             )
             return (False, obj["msg2"])
 
-    # extra: get roomid
     def roomid(self, encode):
         url = f"https://office.chaoxing.com/data/apps/seat/room/list?cpage=1&pageSize=100&firstLevelName=&secondLevelName=&thirdLevelName=&deptIdEnc={encode}"
         json_data = self.requests.get(url=url).content.decode("utf-8")
@@ -121,8 +119,6 @@ class reserve:
         for i in ori_data["data"]["seatRoomList"]:
             info = f'{i["firstLevelName"]}-{i["secondLevelName"]}-{i["thirdLevelName"]} id为：{i["id"]}'
             print(info)
-
-    # solve captcha
 
     def resolve_captcha(self):
         logging.info(f"Start to resolve captcha token")
@@ -181,7 +177,7 @@ class reserve:
         content = response.text
 
         data = content.replace(
-            "jQuery33107685004390294206_1716461324846(", ")"
+            "jQuery33107685004390294206_1716461324846(", ""
         ).replace(")", "")
         data = json.loads(data)
         captcha_token = data["token"]
@@ -189,20 +185,7 @@ class reserve:
         tp = data["imageVerificationVo"]["cutoutImage"]
         return captcha_token, bg, tp
 
-    def x_distance(self, bg, tp):
-        import numpy as np
-        import cv2
-
-        def cut_slide(slide):
-            slider_array = np.frombuffer(slide, np.uint8)
-            slider_image = cv2.imdecode(slider_array, cv2.IMREAD_UNCHANGED)
-            slider_part = slider_image[:, :, :3]
-            mask = slider_image[:, :, 3]
-            mask[mask != 0] = 255
-            x, y, w, h = cv2.boundingRect(mask)
-            cropped_image = slider_part[y : y + h, x : x + w]
-            return cropped_image
-
+    def _download_image(self, url):
         c_captcha_headers = {
             "Referer": "https://office.chaoxing.com/",
             "Host": "captcha-b.chaoxing.com",
@@ -217,25 +200,69 @@ class reserve:
             "Upgrade-Insecure-Requests": "1",
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         }
-        bgc, tpc = self.requests.get(bg, headers=c_captcha_headers), self.requests.get(
-            tp, headers=c_captcha_headers
-        )
-        bg, tp = bgc.content, tpc.content
-        bg_img = cv2.imdecode(np.frombuffer(bg, np.uint8), cv2.IMREAD_COLOR)
-        tp_img = cut_slide(tp)
+        return self.requests.get(url, headers=c_captcha_headers).content
+
+    def x_distance(self, bg, tp):
+        def cut_slide(slide):
+            slider_array = np.frombuffer(slide, np.uint8)
+            slider_image = cv2.imdecode(slider_array, cv2.IMREAD_UNCHANGED)
+            slider_part = slider_image[:, :, :3]
+            mask = slider_image[:, :, 3]
+            mask[mask != 0] = 255
+            x, y, w, h = cv2.boundingRect(mask)
+            cropped_image = slider_part[y : y + h, x : x + w]
+            return cropped_image
+
+        future_bg = self._captcha_executor.submit(self._download_image, bg)
+        future_tp = self._captcha_executor.submit(self._download_image, tp)
+        bg_content = future_bg.result()
+        tp_content = future_tp.result()
+
+        bg_img = cv2.imdecode(np.frombuffer(bg_content, np.uint8), cv2.IMREAD_COLOR)
+        tp_img = cut_slide(tp_content)
         bg_edge = cv2.Canny(bg_img, 100, 200)
         tp_edge = cv2.Canny(tp_img, 100, 200)
         bg_pic = cv2.cvtColor(bg_edge, cv2.COLOR_GRAY2RGB)
         tp_pic = cv2.cvtColor(tp_edge, cv2.COLOR_GRAY2RGB)
         res = cv2.matchTemplate(bg_pic, tp_pic, cv2.TM_CCOEFF_NORMED)
         _, _, _, max_loc = cv2.minMaxLoc(res)
-        tl = max_loc
-        return tl[0]
+        return max_loc[0]
 
-    def submit(self, times, roomid, seatid, action):
-        for seat in seatid:
-            suc = False
-            while ~suc and self.max_attempt > 0:
+    def get_submit(self, times, roomid, seat, captcha, token, value, action):
+        delta_day = 1 if self.reserve_next_day else 0
+        day = datetime.date.today() + datetime.timedelta(days=delta_day)
+        if action:
+            day = datetime.date.today() + datetime.timedelta(
+                days=1 + delta_day
+            )
+        parm = {
+            "roomId": str(roomid),
+            "startTime": times[0],
+            "endTime": times[1],
+            "day": str(day),
+            "seatNum": str(seat),
+            "captcha": captcha,
+            "token": token,
+            "type": "1",
+            "verifyData": "1",
+        }
+        logging.info(f"submit parameter {parm} ")
+        parm["enc"] = verify_param(parm, value)
+        html = self.requests.post(url=self.submit_url, params=parm, verify=True).content.decode(
+            "utf-8"
+        )
+        result = json.loads(html)
+        self.submit_msg.append(
+            times[0] + "~" + times[1] + ":  " + str(result)
+        )
+        logging.info(result)
+        return result["success"]
+
+    def _submit_single_seat(self, times, roomid, seat, action):
+        attempt = 0
+        while attempt < self.max_attempt:
+            attempt += 1
+            try:
                 token, value = self._get_page_token(
                     self.url.format(roomid, seat), require_value=True
                 )
@@ -243,51 +270,30 @@ class reserve:
                 captcha = self.resolve_captcha() if self.enable_slider else ""
                 logging.info(f"Captcha token {captcha}")
                 suc = self.get_submit(
-                    self.submit_url,
-                    times=times,
-                    token=token,
-                    roomid=roomid,
-                    seatid=seat,
-                    captcha=captcha,
-                    action=action,
-                    value=value,
+                    times, roomid, seat, captcha, token, value, action
                 )
                 if suc:
-                    return suc
-                time.sleep(self.sleep_time)
-                self.max_attempt -= 1
-        return suc
+                    return True
+                if self.sleep_time > 0:
+                    time.sleep(self.sleep_time)
+            except Exception as e:
+                logging.warning(f"Seat {seat} attempt {attempt} failed with error: {e}")
+                if self.sleep_time > 0:
+                    time.sleep(self.sleep_time)
+        return False
 
-    def get_submit(
-        self, url, times, token, roomid, seatid, captcha="", action=False, value=""
-    ):
-        delta_day = 1 if self.reserve_next_day else 0
-        day = datetime.date.today() + datetime.timedelta(
-            days=0 + delta_day
-        )  # 预约今天，修改days=1表示预约明天
-        if action:
-            day = datetime.date.today() + datetime.timedelta(
-                days=1 + delta_day
-            )  # 由于action时区问题导致其早+8区一天
-        parm = {
-            "roomId": roomid,
-            "startTime": times[0],
-            "endTime": times[1],
-            "day": str(day),
-            "seatNum": seatid,
-            "captcha": captcha,
-            "token": token,
-            "type": "1",
-            "verifyData": "1",
-        }
-        logging.info(f"submit parameter {parm} ")
-        # parm["enc"] = enc(parm)
-        parm["enc"] = verify_param(parm, value)
-        html = self.requests.post(url=url, params=parm, verify=True).content.decode(
-            "utf-8"
-        )
-        self.submit_msg.append(
-            times[0] + "~" + times[1] + ":  " + str(json.loads(html))
-        )
-        logging.info(json.loads(html))
-        return json.loads(html)["success"]
+    def submit(self, times, roomid, seatid, action):
+        if len(seatid) == 1:
+            return self._submit_single_seat(times, roomid, seatid[0], action)
+        workers = min(len(seatid), 10)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    self._submit_single_seat, times, roomid, seat, action
+                ): seat
+                for seat in seatid
+            }
+            for future in as_completed(futures):
+                if future.result():
+                    return True
+        return False

@@ -25,13 +25,14 @@ get_current_dayofweek = lambda action: (
 )
 
 
-SLEEPTIME = 0.05  # 每次抢座的间隔，从0.2降到0.05
+SLEEPTIME = 0.01  # 每次抢座的间隔，进一步降低到0.01
 ENDTIME = "15:01:00"  # 根据学校的预约座位时间+1min即可
 STARTTIME = "15:00:00"  # GitHub Actions 场景下，脚本会等待到该时刻再开始抢座（精确到秒）
 WAIT_UNTIL_STARTTIME_IN_ACTIONS = True  # 仅在 --action 时生效
+PRE_LOGIN_BEFORE_START = 30  # 在STARTTIME前多少秒开始预热登录（秒）
 
 ENABLE_SLIDER = True  # 是否有滑块验证
-MAX_ATTEMPT = 5  # 最大尝试次数
+MAX_ATTEMPT = 20  # 最大尝试次数，从5提升到20
 RESERVE_NEXT_DAY = False  # 预约明天而不是今天的
 
 
@@ -94,7 +95,21 @@ def split_time_ranges(time_cfg, max_hours_per_reserve: float = 5):
     return segs
 
 
-def reserve_single_user(user, username, password, action, current_dayofweek):
+def _create_and_login(username, password):
+    """创建reserve实例并完成登录，可用于预热"""
+    s = reserve(
+        sleep_time=SLEEPTIME,
+        max_attempt=MAX_ATTEMPT,
+        enable_slider=ENABLE_SLIDER,
+        reserve_next_day=RESERVE_NEXT_DAY,
+    )
+    s.get_login_status()
+    s.login(username, password)
+    s.requests.headers.update({"Host": "office.chaoxing.com"})
+    return s
+
+
+def reserve_single_user(user, username, password, action, current_dayofweek, prebuilt_session=None):
     """
     为单个用户执行预约（包含登录和所有时间段）。
     返回 (index, success_list)
@@ -117,27 +132,71 @@ def reserve_single_user(user, username, password, action, current_dayofweek):
         f"----------- {username} -- {times_list} -- {seatid} try -----------"
     )
 
-    s = reserve(
-        sleep_time=SLEEPTIME,
-        max_attempt=MAX_ATTEMPT,
-        enable_slider=ENABLE_SLIDER,
-        reserve_next_day=RESERVE_NEXT_DAY,
-    )
-    s.get_login_status()
-    s.login(username, password)
-    s.requests.headers.update({"Host": "office.chaoxing.com"})
+    if prebuilt_session is not None:
+        s = prebuilt_session
+    else:
+        s = _create_and_login(username, password)
 
     success_seg = [False] * len(times_list)
-    for seg_i, times in enumerate(times_list):
+
+    if len(times_list) == 1:
         s.max_attempt = MAX_ATTEMPT
-        suc = s.submit(times, roomid, seatid, action)
-        success_seg[seg_i] = suc
+        success_seg[0] = s.submit(times_list[0], roomid, seatid, action)
+    else:
+        seg_workers = min(len(times_list), 5)
+        with ThreadPoolExecutor(max_workers=seg_workers) as seg_executor:
+            seg_futures = {}
+            for seg_i, times in enumerate(times_list):
+                s_seg = s if seg_i == 0 else _create_and_login(username, password)
+                s_seg.max_attempt = MAX_ATTEMPT
+                seg_futures[
+                    seg_executor.submit(s_seg.submit, times, roomid, seatid, action)
+                ] = seg_i
+            for seg_future in as_completed(seg_futures):
+                seg_i = seg_futures[seg_future]
+                try:
+                    success_seg[seg_i] = seg_future.result()
+                except Exception as e:
+                    logging.error(f"Segment {seg_i} failed: {e}")
+                    success_seg[seg_i] = False
 
     logging.info(f"{username} segments result: {success_seg}")
     return success_seg
 
 
-def login_and_reserve(users, usernames, passwords, action, success_list=None):
+def pre_login_all_users(users, usernames, passwords, action):
+    """在STARTTIME之前，提前为所有用户完成登录（预热）"""
+    current_dayofweek = get_current_dayofweek(action)
+    sessions = [None] * len(users)
+
+    def _do_pre_login(index):
+        user = users[index]
+        username = user.get("username", "")
+        password = user.get("password", "")
+        if action:
+            username, password = (
+                usernames.split(",")[index],
+                passwords.split(",")[index],
+            )
+        daysofweek = user.get("daysofweek", [])
+        if current_dayofweek not in daysofweek:
+            return index, None
+        try:
+            s = _create_and_login(username, password)
+            return index, s
+        except Exception as e:
+            logging.warning(f"Pre-login user {index} failed: {e}")
+            return index, None
+
+    with ThreadPoolExecutor(max_workers=min(len(users), 5)) as executor:
+        futures = [executor.submit(_do_pre_login, i) for i in range(len(users))]
+        for future in as_completed(futures):
+            idx, sess = future.result()
+            sessions[idx] = sess
+    return sessions
+
+
+def login_and_reserve(users, usernames, passwords, action, success_list=None, prebuilt_sessions=None):
     logging.info(
         f"Global settings: \nSLEEPTIME: {SLEEPTIME}\nENDTIME: {ENDTIME}\nENABLE_SLIDER: {ENABLE_SLIDER}\nRESERVE_NEXT_DAY: {RESERVE_NEXT_DAY}"
     )
@@ -148,7 +207,6 @@ def login_and_reserve(users, usernames, passwords, action, success_list=None):
 
     current_dayofweek = get_current_dayofweek(action)
 
-    # 使用线程池并发处理多个用户
     with ThreadPoolExecutor(max_workers=min(len(users), 5)) as executor:
         future_to_index = {}
         for index, user in enumerate(users):
@@ -161,10 +219,10 @@ def login_and_reserve(users, usernames, passwords, action, success_list=None):
                     passwords.split(",")[index],
                 )
 
-            # 如果该用户已经全部成功，跳过
             if success_list[index] is not None and all(success_list[index]):
                 continue
 
+            pre_sess = prebuilt_sessions[index] if prebuilt_sessions else None
             future = executor.submit(
                 reserve_single_user,
                 user,
@@ -172,6 +230,7 @@ def login_and_reserve(users, usernames, passwords, action, success_list=None):
                 password,
                 action,
                 current_dayofweek,
+                pre_sess,
             )
             future_to_index[future] = index
 
@@ -195,9 +254,9 @@ def main(users, action=False):
     if action:
         usernames, passwords = get_user_credentials(action)
     success_list = None
+    prebuilt_sessions = None
     current_dayofweek = get_current_dayofweek(action)
 
-    # 统计当天需要预约的"分段数"（而不是用户数）
     today_reservation_num = 0
     for d in users:
         if current_dayofweek not in d.get("daysofweek", []):
@@ -207,17 +266,27 @@ def main(users, action=False):
             split_time_ranges(d.get("time"), max_hours_per_reserve=max_hours)
         )
 
-    # GitHub Actions：先等到目标秒再开始（避免 15:00:xx 前就开始请求）
     if action and WAIT_UNTIL_STARTTIME_IN_ACTIONS:
-        logging.info(f"Waiting until {STARTTIME} to start reserving...")
-        wait_until_time(STARTTIME, action, check_interval=0.2)
+        start_dt = datetime.datetime.strptime(STARTTIME, "%H:%M:%S")
+        pre_login_dt = start_dt - datetime.timedelta(seconds=PRE_LOGIN_BEFORE_START)
+        pre_login_time = pre_login_dt.strftime("%H:%M:%S")
+
+        logging.info(f"Waiting until {pre_login_time} to pre-login users...")
+        wait_until_time(pre_login_time, action, check_interval=0.2)
+        logging.info("Start pre-login all users (warm up)...")
+        prebuilt_sessions = pre_login_all_users(users, usernames, passwords, action)
+        logging.info(f"Pre-login done. Waiting until {STARTTIME} to start reserving...")
+        wait_until_time(STARTTIME, action, check_interval=0.01)
         current_time = get_current_time(action)
 
     while current_time < ENDTIME:
         attempt_times += 1
         success_list = login_and_reserve(
-            users, usernames, passwords, action, success_list
+            users, usernames, passwords, action, success_list,
+            prebuilt_sessions if attempt_times == 1 else None
         )
+        if attempt_times == 1:
+            prebuilt_sessions = None
         reserved_num = sum(sum(u) for u in success_list if isinstance(u, list))
         print(
             f"attempt time {attempt_times}, time now {current_time}, reserved {reserved_num}/{today_reservation_num}, success list {success_list}"
@@ -238,11 +307,19 @@ def debug(users, action=False):
         usernames, passwords = get_user_credentials(action)
     current_dayofweek = get_current_dayofweek(action)
 
+    prebuilt_sessions = None
     if action and WAIT_UNTIL_STARTTIME_IN_ACTIONS:
-        logging.info(f"Waiting until {STARTTIME} to start debug submit...")
-        wait_until_time(STARTTIME, action, check_interval=0.05)
+        start_dt = datetime.datetime.strptime(STARTTIME, "%H:%M:%S")
+        pre_login_dt = start_dt - datetime.timedelta(seconds=PRE_LOGIN_BEFORE_START)
+        pre_login_time = pre_login_dt.strftime("%H:%M:%S")
 
-    # 使用线程池并发处理多个用户
+        logging.info(f"Waiting until {pre_login_time} to pre-login users...")
+        wait_until_time(pre_login_time, action, check_interval=0.2)
+        logging.info("Start pre-login all users (warm up)...")
+        prebuilt_sessions = pre_login_all_users(users, usernames, passwords, action)
+        logging.info(f"Pre-login done. Waiting until {STARTTIME} to start debug submit...")
+        wait_until_time(STARTTIME, action, check_interval=0.01)
+
     with ThreadPoolExecutor(max_workers=min(len(users), 5)) as executor:
         futures = []
         for index, user in enumerate(users):
@@ -270,6 +347,7 @@ def debug(users, action=False):
                 f"----------- {username} -- {times_list} -- {seatid} try -----------"
             )
 
+            pre_sess = prebuilt_sessions[index] if prebuilt_sessions else None
             future = executor.submit(
                 _debug_single_user,
                 username,
@@ -278,6 +356,7 @@ def debug(users, action=False):
                 roomid,
                 seatid,
                 action,
+                pre_sess,
             )
             futures.append((future, username))
 
@@ -289,22 +368,37 @@ def debug(users, action=False):
                 logging.error(f"{username} debug failed: {e}")
 
 
-def _debug_single_user(username, password, times_list, roomid, seatid, action):
+def _debug_single_user(username, password, times_list, roomid, seatid, action, prebuilt_session=None):
     """debug 模式下单个用户的预约逻辑"""
-    s = reserve(
-        sleep_time=SLEEPTIME,
-        max_attempt=MAX_ATTEMPT,
-        enable_slider=ENABLE_SLIDER,
-        reserve_next_day=RESERVE_NEXT_DAY,
-    )
-    s.get_login_status()
-    s.login(username, password)
-    s.requests.headers.update({"Host": "office.chaoxing.com"})
+    if prebuilt_session is not None:
+        s = prebuilt_session
+    else:
+        s = reserve(
+            sleep_time=SLEEPTIME,
+            max_attempt=MAX_ATTEMPT,
+            enable_slider=ENABLE_SLIDER,
+            reserve_next_day=RESERVE_NEXT_DAY,
+        )
+        s.get_login_status()
+        s.login(username, password)
+        s.requests.headers.update({"Host": "office.chaoxing.com"})
+
     success_seg = []
-    for times in times_list:
+    if len(times_list) == 1:
         s.max_attempt = MAX_ATTEMPT
-        suc = s.submit(times, roomid, seatid, action)
-        success_seg.append(suc)
+        success_seg.append(s.submit(times_list[0], roomid, seatid, action))
+    else:
+        seg_workers = min(len(times_list), 5)
+        with ThreadPoolExecutor(max_workers=seg_workers) as seg_executor:
+            seg_futures = []
+            for seg_i, times in enumerate(times_list):
+                s_seg = s if seg_i == 0 else _create_and_login(username, password)
+                s_seg.max_attempt = MAX_ATTEMPT
+                seg_futures.append(
+                    seg_executor.submit(s_seg.submit, times, roomid, seatid, action)
+                )
+            for sf in seg_futures:
+                success_seg.append(sf.result())
     return success_seg
 
 

@@ -75,10 +75,10 @@ class reserve:
     def _get_page_token(self, url, require_value=False):
         response = self.requests.get(url=url, verify=False)
         html = response.content.decode("utf-8")
-        matches = re.findall(r'id="submit_enc"\s+value="(.*?)"', html)
+        matches = re.findall(r'id="submit_enc"[^>]*?value="(.*?)"', html)
         value_matches = None
         if require_value:
-            value_matches = re.findall(r'value="(.*?)"', html)
+            value_matches = re.findall(r'id="algorithm"[^>]*?value="(.*?)"', html)
             if not matches:
                 logging.error(f"Failed to get token from {url}")
                 return "", ""
@@ -256,23 +256,29 @@ class reserve:
             times[0] + "~" + times[1] + ":  " + str(result)
         )
         logging.info(result)
-        return result["success"]
+        return result
 
     def _submit_single_seat(self, times, roomid, seat, action):
         attempt = 0
         while attempt < self.max_attempt:
             attempt += 1
             try:
+                captcha = self.resolve_captcha() if self.enable_slider else ""
+                logging.info(f"Captcha token {captcha}")
+                if self.enable_slider and not captcha:
+                    continue
+
                 token, value = self._get_page_token(
                     self.url.format(roomid, seat), require_value=True
                 )
                 logging.info(f"Get token: {token}")
-                captcha = self.resolve_captcha() if self.enable_slider else ""
-                logging.info(f"Captcha token {captcha}")
-                suc = self.get_submit(
+                if not token or not value:
+                    continue
+
+                result = self.get_submit(
                     times, roomid, seat, captcha, token, value, action
                 )
-                if suc:
+                if result.get("success"):
                     return True
                 if self.sleep_time > 0:
                     time.sleep(self.sleep_time)

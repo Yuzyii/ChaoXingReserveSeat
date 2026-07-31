@@ -5,7 +5,6 @@ import re
 import time
 import logging
 import datetime
-import os
 import numpy as np
 import cv2
 from urllib3.exceptions import InsecureRequestWarning
@@ -72,37 +71,21 @@ class reserve:
         self.enable_slider = enable_slider
         self.reserve_next_day = reserve_next_day
         self._captcha_executor = ThreadPoolExecutor(max_workers=2)
-        self._default_algorithm_value = "%sd`~7^/>N4!Q#){''"
 
     def _get_page_token(self, url, require_value=False):
         response = self.requests.get(url=url, verify=False)
-        if response.status_code != 200 or "passport2.chaoxing.com" in str(response.url):
-            logging.error(f"Failed to load seat page: {response.status_code} {response.url}")
-            return ("", "") if require_value else ("", "")
         html = response.content.decode("utf-8")
-        token_val = None
-        m_submit_enc = re.search(r'id="submit_enc"[^>]*?value="(.*?)"', html)
-        if m_submit_enc:
-            token_val = m_submit_enc.group(1)
-        else:
-            m_token = self.token_pattern.search(html)
-            if m_token:
-                token_val = m_token.group(1)
-
+        matches = re.findall(r'id="submit_enc"[^>]*?value="(.*?)"', html)
         value_matches = None
         if require_value:
-            algorithm_val = None
+            algorithm_val = ""
             patterns = [
                 r'id="algorithm"[^>]*?value="(.*?)"',
-                r"id='algorithm'[^>]*?value='(.*?)'",
+                r'id="algorithm"[^>]*?value=\'(.*?)\'',
                 r'name="algorithm"[^>]*?value="(.*?)"',
-                r"name='algorithm'[^>]*?value='(.*?)'",
+                r'name="algorithm"[^>]*?value=\'(.*?)\'',
                 r'var\s+algorithm\s*=\s*"(.*?)"',
                 r"var\s+algorithm\s*=\s*'(.*?)'",
-                r'algorithm\s*=\s*"(.*?)"',
-                r"algorithm\s*=\s*'(.*?)'",
-                r'algorithm"\s*:\s*"(.*?)"',
-                r"algorithm'\s*:\s*'(.*?)'",
             ]
             for p in patterns:
                 m = re.search(p, html)
@@ -110,26 +93,17 @@ class reserve:
                     algorithm_val = m.group(1)
                     break
             if not algorithm_val:
-                algorithm_val = self._default_algorithm_value
+                all_values = re.findall(r'value="(.*?)"', html)
+                algorithm_val = all_values[0] if all_values else ""
+
             value_matches = [algorithm_val] if algorithm_val else None
-            if not token_val:
+            if not matches:
                 logging.error(f"Failed to get token from {url}")
                 return "", ""
             if not value_matches:
                 logging.error(f"Failed to get submit value from {url}")
-                try:
-                    dump_dir = os.path.join(os.getcwd(), "debug_dumps")
-                    os.makedirs(dump_dir, exist_ok=True)
-                    dump_path = os.path.join(
-                        dump_dir, f"seat_code_{int(time.time()*1000)}.html"
-                    )
-                    with open(dump_path, "w", encoding="utf-8") as f:
-                        f.write(html[:20000])
-                    logging.error(f"Seat page dump saved: {dump_path}")
-                except Exception:
-                    pass
-                return token_val, ""
-        return token_val if token_val else "", value_matches[0] if value_matches else ""
+                return matches[0], ""
+        return matches[0] if matches else "", value_matches[0] if value_matches else ""
 
     def get_login_status(self):
         self.requests.headers = self.login_headers
@@ -164,9 +138,9 @@ class reserve:
             info = f'{i["firstLevelName"]}-{i["secondLevelName"]}-{i["thirdLevelName"]} id为：{i["id"]}'
             print(info)
 
-    def resolve_captcha(self, referer=None):
+    def resolve_captcha(self):
         logging.info(f"Start to resolve captcha token")
-        captcha_token, bg, tp = self.get_slide_captcha_data(referer=referer)
+        captcha_token, bg, tp = self.get_slide_captcha_data()
         logging.info(f"Successfully get prepared captcha_token {captcha_token}")
         logging.info(f"Captcha Image URL-small {tp}, URL-big {bg}")
         x = self.x_distance(bg, tp)
@@ -200,12 +174,11 @@ class reserve:
             logging.info("Can't load validate value. Maybe server return mistake.")
             return ""
 
-    def get_slide_captcha_data(self, referer=None):
+    def get_slide_captcha_data(self):
         url = "https://captcha.chaoxing.com/captcha/get/verification/image"
         timestamp = int(time.time() * 1000)
         capture_key, token = generate_captcha_key(timestamp)
-        if not referer:
-            referer = "https://office.chaoxing.com/front/third/apps/seat/code?id=3993&seatNum=0199"
+        referer = f"https://office.chaoxing.com/front/third/apps/seat/code?id=3993&seatNum=0199"
         params = {
             "callback": f"jQuery33107685004390294206_1716461324846",
             "captchaId": "42sxgHoTPTKbt0uZxPJ7ssOvtXr3ZgZ1",
@@ -301,34 +274,29 @@ class reserve:
             times[0] + "~" + times[1] + ":  " + str(result)
         )
         logging.info(result)
-        return result
+        return result["success"]
 
     def _submit_single_seat(self, times, roomid, seat, action):
         attempt = 0
         while attempt < self.max_attempt:
             attempt += 1
             try:
-                seat_page_url = self.url.format(roomid, seat)
                 token, value = self._get_page_token(
-                    seat_page_url, require_value=True
+                    self.url.format(roomid, seat), require_value=True
                 )
                 logging.info(f"Get token: {token}")
                 if not token or not value:
                     continue
 
-                captcha = (
-                    self.resolve_captcha(referer=seat_page_url)
-                    if self.enable_slider
-                    else ""
-                )
+                captcha = self.resolve_captcha() if self.enable_slider else ""
                 logging.info(f"Captcha token {captcha}")
                 if self.enable_slider and not captcha:
                     continue
 
-                result = self.get_submit(
+                suc = self.get_submit(
                     times, roomid, seat, captcha, token, value, action
                 )
-                if result.get("success"):
+                if suc:
                     return True
                 if self.sleep_time > 0:
                     time.sleep(self.sleep_time)

@@ -4,8 +4,8 @@
         "password": "88888888",
         "time": [["10:00","15:00"], ["17:00","22:00"]],
         "max_hours_per_reserve": 5,
-        "roomid":"3224",
-        "seatid":["160"],
+        "roomid":"2202",
+        "seatid":["010"],
         "daysofweek": ["Monday" , "Tuesday", "Wednesday", "Thursday", "Friday","Saturday" , "Sunday"]
     }
     ]
